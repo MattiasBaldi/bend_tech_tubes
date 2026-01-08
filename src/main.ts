@@ -1,161 +1,175 @@
 import * as THREE from 'three';
-import { NURBSCurve } from 'three/addons/curves/NURBSCurve.js';
 import Stats from 'three/addons/libs/stats.module.js';
 import GUI from 'lil-gui';
-import {HDRLoader} from 'three/examples/jsm/loaders/HDRLoader.js'
-import {OrbitControls} from 'three/examples/jsm/controls/OrbitControls.js'
+import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
 let scene, camera, renderer, group, stats, controls;
-let nurbsCurve, nurbsLine;
+let tubeMesh;
 
-// 4 parametric bends
+const BEND_RADIUS = 3;
+
+// 4 parametric bends (Bend-Tech style)
 const bends = [
-    { length: 8.5, angle: 100, rotation: 0, dimType: 'tangent' },
-    { length: 5, angle: 66, rotation: 120, dimType: 'tangent' },
-    { length: 5.25, angle: 66, rotation: 0, dimType: 'tangent' },
-    { length: 5, angle: 100, rotation: -120, dimType: 'tangent' }
+  { length: 8.5, angle: 100, rotation: 0 },
+  { length: 5, angle: 66, rotation: 120 },
+  { length: 5.25, angle: 66, rotation: 0 },
+  { length: 5, angle: 100, rotation: -120 }
 ];
 
-// final straight end
 let endLength = 8.5;
-
-// camera controls
 const cameraControls = { x: 5, y: 0, z: 5 };
 
 init();
 
 async function init() {
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xf0f0f0);
 
-    scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xf0f0f0);
+  camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 2000);
+  camera.position.set(cameraControls.x, cameraControls.y, cameraControls.z);
 
-    camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 2000);
-    camera.position.set(cameraControls.x, cameraControls.y, cameraControls.z);
+  group = new THREE.Group();
+  group.scale.setScalar(0.1);
+  scene.add(group);
 
-    group = new THREE.Group();
-    group.scale.setScalar(0.1)
-    scene.add(group);
+  const env = await new HDRLoader().loadAsync('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/potsdamer_platz_1k.hdr'); //prettier-ignore
+  env.mapping = THREE.EquirectangularReflectionMapping;
+  scene.environment = env;
 
-    const loader = new HDRLoader();
-    const envMap = await loader.loadAsync( 'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/potsdamer_platz_1k.hdr' );
-    envMap.mapping = THREE.EquirectangularReflectionMapping;
-    scene.environment = envMap;
+  buildTube();
 
-    // Build initial curve
-    updateNURBSCurve();
+  const gui = new GUI();
+  bends.forEach((b, i) => {
+    const f = gui.addFolder(`Bend ${i + 1}`);
+    f.add(b, 'length', 0, 20).onChange(buildTube);
+    f.add(b, 'angle', -180, 180).onChange(buildTube);
+    f.add(b, 'rotation', -180, 180).onChange(buildTube);
+  });
 
-    // GUI
-    const gui = new GUI();
+  gui.add({ endLength }, 'endLength', 0, 20).onChange(v => {
+    endLength = v;
+    buildTube();
+  });
 
-    // Bend parameters
-    bends.forEach((b, i) => {
-        const folder = gui.addFolder(`Bend ${i + 1}`);
-        folder.add(b, 'length', 0, 10).onChange(updateNURBSCurve);
-        folder.add(b, 'angle', -180, 180).onChange(updateNURBSCurve);
-        folder.add(b, 'rotation', -180, 180).onChange(updateNURBSCurve);
-        folder.add(b, 'dimType', ['tangent', 'apex']).onChange(updateNURBSCurve);
-    });
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
 
-    // End length
-    gui.add({ endLength }, 'endLength', 0, 20).name('End Length').onChange(value => {
-        endLength = value;
-        updateNURBSCurve();
-    });
+  controls = new OrbitControls(camera, renderer.domElement);
+  stats = new Stats();
+  document.body.appendChild(stats.dom);
 
-    // Camera controls
-    const camFolder = gui.addFolder('Camera Position');
-    camFolder.add(cameraControls, 'x', -500, 500).onChange(updateCamera);
-    camFolder.add(cameraControls, 'y', -500, 500).onChange(updateCamera);
-    camFolder.add(cameraControls, 'z', -500, 1500).onChange(updateCamera);
-
-    renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    document.body.appendChild(renderer.domElement);
-
-
-    // controls
-    controls = new OrbitControls(camera, renderer.domElement)
-
-    stats = new Stats();
-    document.body.appendChild(stats.dom);
-
-    window.addEventListener('resize', () => {
-        camera.aspect = window.innerWidth / window.innerHeight;
-        camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
-    });
-
-    animate();
+  animate();
 }
 
-function updateCamera() {
-    camera.position.set(cameraControls.x, cameraControls.y, cameraControls.z);
-}
-
-// Convert bend parameters to 3D control points
-function computeControlPoints() {
-    const points = [];
-    let currentPos = new THREE.Vector3(0, 0, 0);
-    let tangent = new THREE.Vector3(1, 0, 0); // initial direction
-    let up = new THREE.Vector3(0, 1, 0);      // initial up vector
-
-    bends.forEach(b => {
-        const rotQuat = new THREE.Quaternion().setFromAxisAngle(tangent, THREE.MathUtils.degToRad(b.rotation));
-        up.applyQuaternion(rotQuat);
-
-        const axis = new THREE.Vector3().crossVectors(tangent, up).normalize();
-        const angleRad = THREE.MathUtils.degToRad(b.angle);
-
-        const midTangent = tangent.clone().applyAxisAngle(axis, angleRad / 2);
-        const midPoint = currentPos.clone().add(midTangent.clone().multiplyScalar(b.length));
-
-        points.push(currentPos.clone());
-        points.push(midPoint);
-
-        currentPos.add(tangent.clone().applyAxisAngle(axis, angleRad).multiplyScalar(b.length));
-        tangent.applyAxisAngle(axis, angleRad);
-    });
-
-    // final straight segment
-    const endPoint = currentPos.clone().add(tangent.clone().multiplyScalar(endLength));
-    points.push(currentPos.clone());
-    points.push(endPoint);
-
-    return points;
-}
-
-// Rebuild NURBS curve and update line geometry
-function updateNURBSCurve() {
-  if(nurbsLine) {
-    nurbsLine.geometry.dispose()
-    nurbsLine.material.dispose()
-    group.remove(nurbsLine)
- 
+function buildTube() {
+  if (tubeMesh) {
+    tubeMesh.geometry.dispose();
+    tubeMesh.material.dispose();
+    group.remove(tubeMesh);
   }
-    const controlPoints3 = computeControlPoints();
-    const nurbsDegree = 4;
 
-    const knots = [];
-    for (let i = 0; i <= nurbsDegree; i++) knots.push(0);
-    for (let i = 0; i < controlPoints3.length; i++) {
-        const knot = (i + 1) / (controlPoints3.length - nurbsDegree);
-        knots.push(THREE.MathUtils.clamp(knot, 0, 1));
-    }
+  const path = new THREE.CurvePath();
 
-    const controlPoints4 = controlPoints3.map(p => new THREE.Vector4(p.x, p.y, p.z, 1));
-    nurbsCurve = new NURBSCurve(nurbsDegree, knots, controlPoints4);
+  let pos = new THREE.Vector3(0, 0, 0);
+  let tangent = new THREE.Vector3(1, 0, 0);
+  let normal = new THREE.Vector3(0, 1, 0);
 
-    const points = nurbsCurve.getPoints(200);
-   const geometry = new THREE.TubeGeometry(nurbsCurve, 100, 0.5, 100)
-        const material = new THREE.MeshStandardMaterial({ roughness: 0, metalness: 1, color: "white" });
-        nurbsLine = new THREE.Mesh(geometry, material);
-        nurbsLine.position.set(0, 0, 0)
-        group.add(nurbsLine);
+  bends.forEach(b => {
+    // straight
+    const nextPos = pos.clone().add(tangent.clone().multiplyScalar(b.length));
+    path.add(new THREE.LineCurve3(pos.clone(), nextPos.clone()));
+    pos.copy(nextPos);
+
+    // rotate frame (bend rotation)
+    const roll = new THREE.Quaternion().setFromAxisAngle(
+      tangent,
+      THREE.MathUtils.degToRad(b.rotation)
+    );
+    normal.applyQuaternion(roll);
+
+    // bend arc
+    const axis = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+    const arcAngle = THREE.MathUtils.degToRad(b.angle);
+    const arc = makeArc3D(pos, tangent, axis, BEND_RADIUS, arcAngle);
+    path.add(arc);
+
+    // advance frame
+    pos.copy(arc.getPoint(1));
+    tangent.applyAxisAngle(axis, arcAngle);
+    normal.applyAxisAngle(axis, arcAngle);
+  });
+
+  // final straight
+  const endPos = pos.clone().add(tangent.clone().multiplyScalar(endLength));
+  path.add(new THREE.LineCurve3(pos, endPos));
+
+const geom = new THREE.TubeGeometry(path, 300, 0.5, 24);
+
+// center geometry at origin
+geom.computeBoundingBox();
+const center = new THREE.Vector3();
+geom.boundingBox.getCenter(center);
+const size = new THREE.Vector3();
+geom.boundingBox.getSize(size);
+geom.translate(-center.x, -center.y, -center.z);
+
+
+// determine dominant axis
+let axis = 'x';
+if (size.y > size.x && size.y > size.z) axis = 'y';
+if (size.z > size.x && size.z > size.y) axis = 'z';
+
+// rotate geometry to align dominant axis to X
+const m = new THREE.Matrix4();
+
+if (axis === 'y') {
+  m.makeRotationZ(-Math.PI / 2);
+  geom.applyMatrix4(m);
+}
+
+if (axis === 'z') {
+  m.makeRotationY(Math.PI / 2);
+  geom.applyMatrix4(m);
+}
+
+const mat = new THREE.MeshStandardMaterial({ metalness: 1, roughness: 0 });
+tubeMesh = new THREE.Mesh(geom, mat);
+group.add(tubeMesh);
+}
+
+// true circular arc in 3D
+function makeArc3D(origin, tangent, axis, radius, angle) {
+  const center = origin.clone().add(
+    new THREE.Vector3()
+      .crossVectors(axis, tangent)
+      .normalize()
+      .multiplyScalar(radius)
+  );
+
+  const points = [];
+  const segments = 32;
+
+  for (let i = 0; i <= segments; i++) {
+    const t = (i / segments) * angle;
+    const q = new THREE.Quaternion().setFromAxisAngle(axis, t);
+
+    const p = origin
+      .clone()
+      .sub(center)
+      .applyQuaternion(q)
+      .add(center);
+
+    points.push(p);
+  }
+
+  return new THREE.CatmullRomCurve3(points, false);
 }
 
 function animate() {
-    requestAnimationFrame(animate);
-    stats.update();
-    controls.update(); 
-    renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+  stats.update();
+  controls.update();
+  renderer.render(scene, camera);
 }
